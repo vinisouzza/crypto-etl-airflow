@@ -33,7 +33,7 @@ O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum** e **D
 ## Diagrama e Dashboard
 
 ### **Diagrama do Pipeline**
-![Pipeline](img/pipeline-architecture.png)
+![Pipeline](img/etl-diagram.png)
 
 ### **Dashboard no Metabase**
 ![Dashboard](img/metabase-dashboard.png)
