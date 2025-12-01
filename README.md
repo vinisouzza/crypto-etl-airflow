@@ -52,7 +52,7 @@ O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum** e **D
 
 ### 1. Clone o repositório
 ```bash
-git clone [https://github.com/vinisouzza/crypto-etl-airflow.git](https://github.com/vinisouzza/crypto-etl-airflow.git)
+git clone https://github.com/vinisouzza/crypto-etl-airflow.git
 cd crypto-etl-airflow
 ```
 
