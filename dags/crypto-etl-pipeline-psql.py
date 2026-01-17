@@ -98,7 +98,7 @@ with DAG(
         CREATE TABLE IF NOT EXISTS crypto_prices (
             crypto_id TEXT,
             price_usd REAL,
-            extracted_at TIMESTAMP
+            extracted_at TIMESTAMP,
             PRIMARY KEY (crypto_id, extracted_at)
         );
         """
