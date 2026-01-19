@@ -1,0 +1,9 @@
+data_source postgres_coingecko:
+  type: postgres
+  connection:
+    host: postgres
+    port: '5432'
+    username: airflow
+    password: airflow
+    database: airflow 
+    schema: public

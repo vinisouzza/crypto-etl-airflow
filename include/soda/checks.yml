@@ -1,0 +1,10 @@
+checks for crypto_prices:
+  # Regra 1: O preço nunca pode ser negativo
+  - min(price_usd):
+      fail: when < 0
+
+  # Regra 2: Frescor (Dados não podem ser mais velhos que 2 horas)
+  - freshness(extracted_at):
+      warn: when > 2h
+      fail: when > 6h
+

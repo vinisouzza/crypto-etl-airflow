@@ -7,7 +7,7 @@ from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.http.operators.http import HttpOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-
+from soda.scan import Scan
 
 # Argumentos padrão
 default_args = {
@@ -71,6 +71,23 @@ def _transform_and_load(ti):
     cursor.close()
     conn.close()
 
+def run_soda_scan():
+    scan = Scan()
+    scan.set_data_source_name("postgres_coingecko")
+    
+    # Caminhos para os arquivos YAML
+    scan.add_configuration_yaml_file("/opt/airflow/include/soda/configuration.yml")
+    scan.add_sodacl_yaml_file("/opt/airflow/include/soda/checks.yml")
+    
+    # Executa a verificação
+    exit_code = scan.execute()
+    
+    # Se houver falhas, gera logs e para a DAG
+    if exit_code != 0:
+        raise ValueError("Soda Scan encontrou dados de má qualidade! Parando pipeline.")
+    
+    print(scan.get_logs_text())
+
 with DAG(
     'crypto_etl_pipeline_psql',
     default_args=default_args,
@@ -120,6 +137,11 @@ with DAG(
         log_response=True,
     )
 
+    task_quality_check = PythonOperator(
+        task_id='data_quality_check',
+        python_callable=run_soda_scan
+    )
+
     # Tarefa 4: Operator - Transformar e carregar os dados
     task_transform_and_load = PythonOperator(
         task_id='task_transform_and_load',
@@ -127,4 +149,4 @@ with DAG(
     )
 
     # Definindo o fluxo do pipeline
-    task_check_api >> task_create_table >> task_extract_crypto_data >> task_transform_and_load
+    task_check_api >> task_create_table >> task_extract_crypto_data >> task_transform_and_load >> task_quality_check
