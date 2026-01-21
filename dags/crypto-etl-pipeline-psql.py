@@ -1,6 +1,9 @@
 import json
 import pandas as pd
+import logging
 from datetime import datetime, timedelta
+from typing import Dict, Any, List
+
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.http.sensors.http import HttpSensor
@@ -8,6 +11,15 @@ from airflow.providers.http.operators.http import HttpOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from soda.scan import Scan
+
+# Configuração de logging
+logger = logging.getLogger(__name__)
+
+# Configurações constantes
+COINS = ['bitcoin', 'ethereum', 'tether', 'solana']
+CURRENCY = 'usd'
+POSTGRES_CONN_ID = 'postgres_dw'  # Deve ser configurada no Airflow Connections
+API_CONN_ID = 'http_coingecko'  # Deve ser configurada no Airflow Connections
 
 # Argumentos padrão
 default_args = {
@@ -20,58 +32,86 @@ default_args = {
     'retry_delay': timedelta(minutes=2),
 }
 
-def _transform_and_load(ti):
+def _transform_data(ti) -> Dict[str, Any]:
     """
-    Puxa o JSON extraído, transforma com Pandas e carrega no Postgres.
-    'ti' (Task Instance) é injetado pelo Airflow para permitir XComs.
+    Recebe o JSON bruto da API, normaliza com Pandas e retorna um dicionário
+    serializável para o XCom.
     """
-    print("Iniciando transformação e carga de dados...")
+    logger.info("Iniciando transformação de dados.")
 
-    # 1. Puxar (pull) o resultado da tarefa anterior (task_extract) Via XCom
+    # XCom Pull: Pega o output da task de extração
     json_data = ti.xcom_pull(task_ids='task_extract_crypto_data')
 
     if not json_data:
-        raise ValueError("Nenhum dado JSON recebido para transformação.")
+        raise ValueError("Nenhum dado JSON recebido da API.")
     
-    # 2. Transformar os dados com Pandas
-    # A API retorna {'bitcoin': {'usd': 60000}, 'ethereum': {'usd': 4000}, ...}
-
+    
     try:
-        data = json_data
-        df = pd.DataFrame.from_dict(data, orient='index')
+        # Transforma dicionário aninhado em tabular
+        df = pd.DataFrame.from_dict(json_data, orient='index')
         df.reset_index(inplace=True)
         df.rename(columns={'index': 'crypto_id', 'usd': 'price_usd'}, inplace=True) 
 
         # Adiciona timestamp
-        df['extracted_at'] = datetime.now()
+        df['extracted_at'] = datetime.now().isoformat()
 
-        print("Dados transformados:")
-        print(df.head())
-    except Exception as e:
-        raise ValueError(f"Erro na transformação dos dados: {e}")
+        logger.info(f"Transformação concluída. Linhas processadas: {len(df)}")
+        
+        # Retorna como dicionário para o XCom
+        return df.to_dict(orient='records')
     
-    # 3. Carregar no Postgres
-    # Hook para interagir com a conexão 'postgres_dw'
-    pg_hook = PostgresHook(postgres_conn_id='postgres_dw')
+    except Exception as e:
+        logger.error(f"Erro na transformação dos dados: {e}")
+        raise
+    
+def _load_data_to_postgres(ti):
+    """
+    Pega os dados transformados do XCom e faz um Upsert no Postgres.
+    """
+    logger.info("Iniciando carregamento de dados no Postgres.")
+    
+    # XCom Pull: Pega o output da task de transformação
+    data_records = ti.xcom_pull(task_ids='task_transform_data')
+
+    if not data_records:
+        raise ValueError("Nenhum dado transformado disponível para carregar.")
+    
+    # Conecta no banco
+    pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
     conn = pg_hook.get_conn()
     cursor = conn.cursor()
     
-    # Upsert (Inserir ou Atualizar se já existir naquele horário)
-    # Isso garante que se rodar 2x não duplica dados (Idempotência)
-
-    for _, row in df.iterrows():
-        sql = """
+    # Query de UPSERT (Idempotência)
+    sql = """
             INSERT INTO crypto_prices (crypto_id, price_usd, extracted_at)
             VALUES (%s, %s, %s)
             ON CONFLICT (crypto_id, extracted_at) DO NOTHING;
-        """
-        cursor.execute(sql, (row['crypto_id'], row['price_usd'], row['extracted_at']))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    """
 
+    try:
+        # Prepara a lista de tuplas para inserção
+        data_tuples = [
+            (r['crypto_id'], r['price_usd'], r['extracted_at']) for r in data_records
+        ]
+
+        cursor.executemany(sql, data_tuples)
+        conn.commit()
+        logger.info(f"Carga finalizada. Registros inseridos: {len(data_tuples)}")
+    
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Erro ao carregar dados no Postgres: {e}")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+    
 def run_soda_scan():
+    """
+    Executa testes de qualidade de dados usando Soda Core.
+    """
+    logger.info("Iniciando verificação de qualidade de dados com Soda Scan.")
+
     scan = Scan()
     scan.set_data_source_name("postgres_coingecko")
     
@@ -81,36 +121,39 @@ def run_soda_scan():
     
     # Executa a verificação
     exit_code = scan.execute()
+
+    # Imprime logs detalhados no Airflow
+    logger.info(scan.get_logs_text())
     
     # Se houver falhas, gera logs e para a DAG
     if exit_code != 0:
-        raise ValueError("Soda Scan encontrou dados de má qualidade! Parando pipeline.")
+        raise ValueError("Soda Quality Gate Failed! Dados inconsistentes detectados.")
     
-    print(scan.get_logs_text())
-
+# Definição da DAG
 with DAG(
     'crypto_etl_pipeline_psql',
     default_args=default_args,
     schedule='@hourly',
-    description='Pipeline ETL para dados de criptomoedas da CoinGecko usando Airflow, Pandas e Postgres',
+    description='Pipeline ETL CoinGecko: Extract -> Transform -> Load -> Quality Check',
     catchup=False,
-    tags=['etl', 'api', 'projeto', ],
+    tags=['etl', 'crypto', 'postgres'],
 ) as dag:
     
-    # Tarefa 1: Sensor - Verifica se a API está disponível
+    # 1. Sensor: Check API Availability
     task_check_api = HttpSensor(
         task_id='task_check_api_online',
-        http_conn_id='http_coingecko', # ID da conexão HTTP configurada no Airflow
+        http_conn_id=API_CONN_ID,
         endpoint='api/v3/ping' ,      # Endpoint para checar
         response_check=lambda response: response.status_code == 200 and "gecko" in response.text,
-        poke_interval=5, # checa a cada 5 segundos
-        timeout=20,      # tempo máximo de espera 20 segundos
+        poke_interval=10, # checa a cada 10 segundos
+        timeout=60,      # tempo máximo de espera 60 segundos
+        mode='reschedule' # 'reschedule' libera o worker slot enquanto espera (melhor performance)
     )
 
-    # Tarefa 2: Operator - Criar a tabela no Postgres se não existir
+    # 2. DDL: Create Table Schema
     task_create_table = PostgresOperator(
         task_id='task_create_table',
-        postgres_conn_id='postgres_dw', # ID da conexão Postgres configurada no Airflow
+        postgres_conn_id=POSTGRES_CONN_ID,
         sql="""
         CREATE TABLE IF NOT EXISTS crypto_prices (
             crypto_id TEXT,
@@ -121,32 +164,37 @@ with DAG(
         """
     )
 
-    # Tarefa 3: Operator - Extrair dados da API CoinGecko
-    # HttpOperator para fazer a requisição HTTP GET
-    # Por padrão, ele "dá push" da resposta JSON para o XCom
-    task_extract_crypto_data = HttpOperator(
+    # 3. Extract: Get Data from API
+    task_extract = HttpOperator(
         task_id='task_extract_crypto_data',
-        http_conn_id='http_coingecko',
+        http_conn_id=API_CONN_ID,
         endpoint='api/v3/simple/price',
         method='GET',
         data={
-            'ids': 'bitcoin,ethereum,dogecoin',
-            'vs_currencies': 'usd'
+            'ids': ','.join(COINS),
+            'vs_currencies': CURRENCY
         },
         response_filter=lambda response: json.loads(response.text), # Processa a resposta JSON
         log_response=True,
     )
 
-    task_quality_check = PythonOperator(
-        task_id='data_quality_check',
+    # 4. Transform: Clean and Normalize (Python Puro)
+    task_transform = PythonOperator(
+        task_id='task_transform_data',
+        python_callable=_transform_data,
+    )
+
+    # 5. Load: Insert into DB
+    task_load = PythonOperator(
+        task_id='task_load_to_postgres',
+        python_callable=_load_data_to_postgres,
+    )
+
+    # 6. Quality Gate: Validate Data
+    task_quality = PythonOperator(
+        task_id='data_quality_gate',
         python_callable=run_soda_scan
     )
 
-    # Tarefa 4: Operator - Transformar e carregar os dados
-    task_transform_and_load = PythonOperator(
-        task_id='task_transform_and_load',
-        python_callable=_transform_and_load,
-    )
-
-    # Definindo o fluxo do pipeline
-    task_check_api >> task_create_table >> task_extract_crypto_data >> task_transform_and_load >> task_quality_check
+    # Orquestração
+    task_check_api >> task_create_table >> task_extract >> task_transform >> task_load >> task_quality
