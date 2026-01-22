@@ -1,20 +1,23 @@
 # Pipeline ETL de Criptomoedas com Airflow, Postgres e Metabase
 
-Este projeto implementa um pipeline completo de Engenharia de Dados que extrai preços de criptomoedas em tempo real, armazena em um Data Warehouse no PostgreSQL e disponibiliza visualizações no Metabase.
+Este projeto implementa um pipeline completo de Engenharia de Dados que extrai preços de criptomoedas a cada hora, armazena em um Data Warehouse no PostgreSQL, valida a qualidade dos dados usando Soda Core e disponibiliza visualizações no Metabase.
 
-O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum** e **Dogecoin**, permitindo acompanhar tendências.
+O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum**, **Tether** e **Solana**, permitindo acompanhar tendências.
 
 ---
 
-## Arquitetura
+## Arquitetura e Fluxo
+1. **Disponibilidade (Sensor)**: Verifica se a API da CoinGecko está online antes de iniciar o processamento (evita falhas "sujas")
 
-1. **Extração (Extract)** O Airflow consulta a API da CoinGecko a cada hora usando o `HttpOperator`.
+2. **Extração (Extract)**: Coleta dados de criptomoedas (Bitcoin, Ethereum, Tether e Solana) via `HttpOperator`.
 
-2. **Transformação (Transform)** Os dados são processados com Pandas: normalização, flatten do JSON e inclusão de timestamp (UTC).
+3. **Transformação (Transform)**: Os dados são processados com Pandas: normalização, flatten do JSON e inclusão de timestamp (UTC).
 
-3. **Carga (Load)** Os dados são inseridos em um banco PostgreSQL utilizando a técnica de **Upsert/Idempotência**, garantindo que não haja duplicidade de dados se a pipeline rodar mais de uma vez no mesmo horário.
+4. **Carga (Load)**: Inserção em lote (Batch Insert) no PostgreSQL utilizando `executemany`.
 
-4. **Visualização** O Metabase lê diretamente o banco para gerar dashboards interativos e gráficos de tendências.
+5. **Qualidade de Dados (Quality Gate)**: O Soda Core realiza uma auditoria automática nos dados recém-inseridos. Se regras de negócio forem violadas (ex: preço negativo, dados não recentes), o pipeline falha e alerta.
+
+6. **Visualização**: Dashboards no Metabase conectados ao Data Warehouse.
 
 ---
 
@@ -23,6 +26,7 @@ O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum** e **D
 | Componente | Tecnologia |
 |------------|------------|
 | Orquestração | Apache Airflow 2.10 (Docker) |
+| Qualidade de Dados | Soda Core (YAML based checks) |
 | Linguagem | Python 3.12 (Pandas) |
 | Banco de Dados | PostgreSQL 13 |
 | Visualização | Metabase |
@@ -38,7 +42,7 @@ O objetivo é monitorar a variação horária do **Bitcoin**, **Ethereum** e **D
 ### **Dashboard no Metabase**
 ![Dashboard](img/metabase-dashboard.png)
 
-> *Obs: Dashboard ilustrativo apenas com 5 horas de captura de dados.*
+> *Obs: Dashboard ilustrativo apenas com 9 horas de captura de dados.*
 
 ---
 
@@ -82,12 +86,16 @@ docker-compose up -d --build
    - **Schema:** `airflow`
    - **Port:** `5432`
 
-### 4. Execute a DAG
+### 4. Arquivos de Qualidade (Soda)
+As regras de qualidade estão definidas em `include/soda/checks.yml`. Você pode ajustá-las localmente e o Airflow reconhecerá automaticamente via Docker Volume.
+
+### 5. Execute a DAG
 Na tela inicial, ative a DAG `crypto_etl_pipeline_psql` (botão ON/OFF).
+Acompanhe o log da task data_quality_gate para ver o relatório de validação.
 
-Clique no botão **Play (Trigger DAG)** na coluna "Actions".
+---
 
-### 5. Conecte o Metabase
+### Metabase (Analytics)
 - Acesse `http://localhost:3000`.
 - Crie sua conta de administrador.
 - Na configuração de banco de dados, selecione PostgreSQL e use:
@@ -95,4 +103,4 @@ Clique no botão **Play (Trigger DAG)** na coluna "Actions".
     - **Database name**: `airflow`
     - **Username**: `airflow`
     - **Password**: `airflow`
-Crie seus gráficos explorando a tabela crypto_prices.
+- Crie seus gráficos explorando a tabela crypto_prices.
